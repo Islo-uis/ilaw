@@ -1,12 +1,21 @@
 // ==========================================
 // CONFIGURATION
 // ==========================================
-const WEBHOOK_URL = "YOUR_N8N_PRODUCTION_WEBHOOK_URL"; // <-- CHANGE THIS
+// Your public tunnel address (changes whenever cloudflared restarts). No trailing slash.
+const API_BASE = "https://airfare-desktops-regression-liability.trycloudflare.com/webhook";
 
 // Configure PDF.js worker
 if (typeof pdfjsLib !== 'undefined') {
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
+
+// ==========================================
+// HELPERS
+// ==========================================
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+const arr = (v) => Array.isArray(v) ? v : [];
 
 // ==========================================
 // STATE
@@ -85,24 +94,24 @@ function hideAlert() {
 document.querySelectorAll('.dropzone').forEach(zone => {
   const input = zone.querySelector('input[type="file"]');
   const type = zone.dataset.drop;
-  
+
   zone.addEventListener('click', () => input.click());
-  
+
   zone.addEventListener('dragover', (e) => {
     e.preventDefault();
     zone.classList.add('dragover');
   });
-  
+
   zone.addEventListener('dragleave', () => {
     zone.classList.remove('dragover');
   });
-  
+
   zone.addEventListener('drop', (e) => {
     e.preventDefault();
     zone.classList.remove('dragover');
     handleFiles(e.dataTransfer.files, type);
   });
-  
+
   input.addEventListener('change', (e) => {
     handleFiles(e.target.files, type);
     input.value = ''; // reset
@@ -112,7 +121,7 @@ document.querySelectorAll('.dropzone').forEach(zone => {
 async function handleFiles(files, type) {
   const fileArray = Array.from(files);
   const isMultiple = type === 'materials';
-  
+
   if (!isMultiple && fileArray.length > 0) {
     // Replace existing if not multiple
     state.files[type] = [];
@@ -140,7 +149,7 @@ async function handleFiles(files, type) {
     } else {
       state.files[type].push(fileObj);
     }
-    
+
     renderFileList(type);
     processFile(fileObj);
   }
@@ -162,9 +171,9 @@ async function processFile(fileObj) {
   } catch (err) {
     fileObj.error = err.message || 'Failed to extract text';
   }
-  
+
   fileObj.loading = false;
-  
+
   // Find which type this belongs to and re-render
   for (const type in state.files) {
     if (state.files[type].some(f => f.id === fileObj.id)) {
@@ -217,14 +226,14 @@ function renderFileList(type) {
   state.files[type].forEach(fileObj => {
     const li = document.createElement('li');
     li.className = 'file-item';
-    
+
     const head = document.createElement('div');
     head.className = 'file-item-head';
-    
+
     const name = document.createElement('span');
     name.className = 'file-name';
     name.textContent = fileObj.name;
-    
+
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'file-remove';
@@ -233,7 +242,7 @@ function renderFileList(type) {
       state.files[type] = state.files[type].filter(f => f.id !== fileObj.id);
       renderFileList(type);
     };
-    
+
     head.appendChild(name);
     head.appendChild(removeBtn);
     li.appendChild(head);
@@ -251,32 +260,66 @@ function renderFileList(type) {
     } else {
       const meta = document.createElement('div');
       meta.className = 'file-meta';
-      
+
       const len = document.createElement('span');
       len.textContent = `${fileObj.text.length.toLocaleString()} characters extracted`;
-      
+
       const toggle = document.createElement('button');
       toggle.type = 'button';
       toggle.className = 'file-preview-toggle';
       toggle.textContent = 'Review Text';
-      
+
       const preview = document.createElement('div');
       preview.className = 'file-preview-text';
       preview.textContent = fileObj.text;
-      
+
       toggle.onclick = () => {
         preview.classList.toggle('show');
         toggle.textContent = preview.classList.contains('show') ? 'Hide Text' : 'Review Text';
       };
-      
+
       meta.appendChild(len);
       meta.appendChild(toggle);
       li.appendChild(meta);
       li.appendChild(preview);
     }
-    
+
     listEl.appendChild(li);
   });
+}
+
+// ==========================================
+// BACKEND: START JOB, THEN CHECK BACK
+// ==========================================
+async function requestLessonPlan(payload) {
+  // 1. Start the job. n8n replies right away with a job ID.
+  const startRes = await fetch(`${API_BASE}/lessonplan-ai`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const job = await startRes.json().catch(() => ({}));
+  if (!startRes.ok || !job.ok) {
+    throw new Error(job.error || `Server returned ${startRes.status}`);
+  }
+
+  // 2. Check back every few seconds until the result is ready.
+  const deadline = Date.now() + 6 * 60 * 1000; // give up after 6 minutes
+  let failures = 0;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 4000));
+    try {
+      const res = await fetch(`${API_BASE}/lessonplan-status?jobId=${encodeURIComponent(job.jobId)}`);
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `Status check failed (${res.status})`);
+      if (data.status === 'done') return data.workbookData;
+      failures = 0;
+    } catch (err) {
+      failures++;
+      if (failures >= 4) throw err; // tolerate brief network hiccups
+    }
+  }
+  throw new Error('This is taking longer than expected');
 }
 
 // ==========================================
@@ -369,22 +412,18 @@ planForm.addEventListener('submit', async (e) => {
   loadingOverlay.classList.remove('hidden');
 
   try {
-    const response = await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const data = await requestLessonPlan(payload);
 
-    if (!response.ok) {
-      throw new Error(`Server returned ${response.status}: ${response.statusText}`);
-    }
+    // Keep only small metadata (not the full uploaded text) for history
+    const meta = {
+      gradeLevel: payload.gradeLevel,
+      subject: payload.subject,
+      topic: payload.topic,
+      lessonDuration: payload.lessonDuration
+    };
+    state.currentResult = { data, meta, savedAt: Date.now() };
+    try { saveToHistory(state.currentResult); } catch (e) { console.warn('History not saved', e); }
 
-    const data = await response.json();
-    
-    // Save to state & history
-    state.currentResult = { data, meta: payload };
-    saveToHistory(state.currentResult);
-    
     // Render results
     renderResults(state.currentResult);
     switchView('results');
@@ -405,96 +444,77 @@ planForm.addEventListener('submit', async (e) => {
 // RESULTS RENDERING
 // ==========================================
 function renderResults({ data, meta }) {
-  document.getElementById('resultMeta').innerHTML = `
-    <span class="meta-chip">${meta.gradeLevel}</span>
-    <span class="meta-chip">${meta.subject}</span>
-    <span class="meta-chip">${meta.topic}</span>
-    <span class="meta-chip">${meta.lessonDuration}</span>
-  `;
+  data = data.workbookData || data; // tolerate older saved items
 
-  const container = document.getElementById('resultsBody');
-  container.innerHTML = '';
+  document.getElementById('resultMeta').innerHTML =
+    [meta.gradeLevel, meta.subject, meta.topic, meta.lessonDuration]
+      .map(v => `<span class="meta-chip">${esc(v)}</span>`).join('');
 
-  // Helper to safely extract strings/arrays
-  const arr = (val) => Array.isArray(val) ? val : [];
-  const str = (val) => typeof val === 'string' ? val : JSON.stringify(val || '');
+  const lessonPlan = arr(data.lesson_plan);
+  const elos = arr(data.elos);
+  const alignment = arr(data.alignment);
+  const checks = arr(data.quality_checks);
+  const notes = arr(data.teacher_review_notes);
+  const none = (what) => `<div class="result-card"><p class="muted">No ${what} returned.</p></div>`;
 
-  // 1. ILAW Lesson Plan
-  const lessonPlan = data.lessonPlan || data.ilaw || data.lesson_plan || {};
+  // 1. ILAW lesson plan
   let lpHTML = `<div class="result-section"><h2>ILAW Lesson Plan</h2>`;
-  
-  if (typeof lessonPlan === 'string') {
-    lpHTML += `<div class="result-card"><p>${lessonPlan.replace(/\n/g, '<br>')}</p></div>`;
-  } else if (Object.keys(lessonPlan).length > 0) {
-    for (const [key, val] of Object.entries(lessonPlan)) {
-      lpHTML += `
+  lpHTML += lessonPlan.length
+    ? lessonPlan.map(s => `
         <div class="result-card">
-          <h3>${key.replace(/_/g, ' ').toUpperCase()}</h3>
-          <p>${str(val).replace(/\n/g, '<br>')}</p>
-        </div>
-      `;
-    }
-  } else {
-    lpHTML += `<div class="result-card"><p class="muted">No lesson plan data returned.</p></div>`;
-  }
+          <h3>${esc(s.section)}</h3>
+          <p>${esc(s.content).replace(/\n/g, '<br>')}</p>
+        </div>`).join('')
+    : none('lesson plan data');
   lpHTML += `</div>`;
 
   // 2. Expected Learning Outcomes
-  const elos = arr(data.elo || data.elos || data.expectedLearningOutcomes);
   let eloHTML = `<div class="result-section"><h2>Expected Learning Outcomes</h2>`;
-  if (elos.length > 0) {
-    eloHTML += `<div class="table-responsive"><table><thead><tr><th>Code</th><th>Outcome</th><th>Assessment</th></tr></thead><tbody>`;
-    elos.forEach(elo => {
-      eloHTML += `<tr>
-        <td><strong>${str(elo.code)}</strong></td>
-        <td>${str(elo.outcome || elo.description)}</td>
-        <td>${str(elo.assessment || elo.assessmentMethod)}</td>
-      </tr>`;
-    });
-    eloHTML += `</tbody></table></div>`;
-  } else {
-    eloHTML += `<div class="result-card"><p class="muted">No ELO data returned.</p></div>`;
-  }
+  eloHTML += elos.length
+    ? `<div class="table-responsive"><table><thead><tr><th>Code</th><th>Outcome</th><th>Assessment</th></tr></thead><tbody>
+        ${elos.map(e => `<tr>
+          <td><strong>${esc(e.code)}</strong></td>
+          <td>${esc(e.outcome)}</td>
+          <td>${esc(e.assessment)}</td>
+        </tr>`).join('')}
+      </tbody></table></div>`
+    : none('ELO data');
   eloHTML += `</div>`;
 
-  // 3. PPST/COT Matrix
-  const ppst = arr(data.ppstCot || data.ppst || data.matrix);
+  // 3. PPST/COT alignment
   let ppstHTML = `<div class="result-section"><h2>PPST/COT Alignment Matrix</h2>`;
-  if (ppst.length > 0) {
-    ppstHTML += `<div class="table-responsive"><table><thead><tr><th>Indicator</th><th>Lesson Component</th><th>Observable Evidence</th><th>Status</th></tr></thead><tbody>`;
-    ppst.forEach(row => {
-      const statusClass = (str(row.status).toLowerCase().includes('align') ? 'aligned' : 'partial');
-      ppstHTML += `<tr>
-        <td>${str(row.indicator)}</td>
-        <td>${str(row.lessonComponent || row.component)}</td>
-        <td>${str(row.evidence || row.observableEvidence)}</td>
-        <td><span class="status ${statusClass}">${str(row.status || 'Aligned')}</span></td>
-      </tr>`;
-    });
-    ppstHTML += `</tbody></table></div>`;
-  } else {
-    ppstHTML += `<div class="result-card"><p class="muted">No PPST/COT data returned.</p></div>`;
-  }
+  ppstHTML += alignment.length
+    ? `<div class="table-responsive"><table><thead><tr><th>Indicator</th><th>Lesson Component</th><th>Observable Evidence</th><th>Status</th></tr></thead><tbody>
+        ${alignment.map(r => `<tr>
+          <td>${esc(r.indicator)}</td>
+          <td>${esc(r.lesson_component)}</td>
+          <td>${esc(r.evidence)}</td>
+          <td><span class="status ${String(r.status).toLowerCase().includes('addressed') ? 'aligned' : 'partial'}">${esc(r.status)}</span></td>
+        </tr>`).join('')}
+      </tbody></table></div>`
+    : none('PPST/COT data');
   ppstHTML += `</div>`;
 
-  // 4. Quality Checks
-  const qc = data.qualityChecks || data.quality || {};
+  // 4. Quality checks
   let qcHTML = `<div class="result-section"><h2>Quality Checks</h2><div class="quality-grid">`;
-  if (Object.keys(qc).length > 0) {
-    for (const [key, val] of Object.entries(qc)) {
-      qcHTML += `
+  qcHTML += checks.length
+    ? checks.map(c => `
         <div class="q-check">
-          <h4>${key.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim()}</h4>
-          <div class="q-status">${str(val)}</div>
-        </div>
-      `;
-    }
-  } else {
-    qcHTML += `<div class="q-check"><p class="muted">No quality check data returned.</p></div>`;
-  }
+          <h4>${esc(c.check)}</h4>
+          <div class="q-status">${esc(c.result)}</div>
+          <p class="muted">${esc(c.notes)}</p>
+        </div>`).join('')
+    : `<div class="q-check"><p class="muted">No quality check data returned.</p></div>`;
   qcHTML += `</div></div>`;
 
-  container.innerHTML = lpHTML + eloHTML + ppstHTML + qcHTML;
+  // 5. Teacher review notes
+  let noteHTML = `<div class="result-section"><h2>Teacher Review Notes</h2>`;
+  noteHTML += notes.length
+    ? `<div class="result-card"><ul>${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul></div>`
+    : none('review notes');
+  noteHTML += `</div>`;
+
+  document.getElementById('resultsBody').innerHTML = lpHTML + eloHTML + ppstHTML + qcHTML + noteHTML;
 }
 
 // ==========================================
@@ -502,65 +522,47 @@ function renderResults({ data, meta }) {
 // ==========================================
 document.getElementById('downloadBtn').addEventListener('click', () => {
   if (!state.currentResult) return;
-  const { data, meta } = state.currentResult;
+  let { data, meta } = state.currentResult;
+  data = data.workbookData || data;
 
-  // 1. Sheet: ILAW Lesson Plan
-  const lessonPlanData = data.lessonPlan || data.ilaw || {};
-  const ws1Data = [["ILAW Lesson Plan Section", "Lesson Content / Activities"]];
-  if (typeof lessonPlanData === 'string') {
-    ws1Data.push(["Full Plan", lessonPlanData]);
-  } else {
-    for (const [key, val] of Object.entries(lessonPlanData)) {
-      ws1Data.push([key.replace(/_/g, ' ').toUpperCase(), String(val)]);
-    }
-  }
-  const ws1 = XLSX.utils.aoa_to_sheet(ws1Data);
-  ws1['!cols'] = [{ wch: 30 }, { wch: 80 }];
+  const sheet = (rows, widths) => {
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = widths.map(w => ({ wch: w }));
+    return ws;
+  };
 
-  // 2. Sheet: ELO
-  const elos = data.elo || data.elos || data.expectedLearningOutcomes || [];
-  const ws2Data = [["ELO Code", "Expected Learning Outcome", "Assessment Method"]];
-  if (Array.isArray(elos)) {
-    elos.forEach(elo => {
-      ws2Data.push([
-        elo.code || '',
-        elo.outcome || elo.description || '',
-        elo.assessment || elo.assessmentMethod || ''
-      ]);
-    });
-  }
-  const ws2 = XLSX.utils.aoa_to_sheet(ws2Data);
-  ws2['!cols'] = [{ wch: 15 }, { wch: 60 }, { wch: 40 }];
+  const ws1 = sheet(
+    [["ILAW Lesson Plan Section", "Lesson Content / Activities"],
+     ...arr(data.lesson_plan).map(s => [s.section || '', s.content || ''])],
+    [30, 80]);
 
-  // 3. Sheet: PPST-COT
-  const ppst = data.ppstCot || data.ppst || data.matrix || [];
-  const ws3Data = [["Exact Indicator", "Lesson Component", "Observable Evidence", "Alignment Status"]];
-  if (Array.isArray(ppst)) {
-    ppst.forEach(row => {
-      ws3Data.push([
-        row.indicator || '',
-        row.lessonComponent || row.component || '',
-        row.evidence || row.observableEvidence || '',
-        row.status || 'Aligned'
-      ]);
-    });
-  }
-  const ws3 = XLSX.utils.aoa_to_sheet(ws3Data);
-  ws3['!cols'] = [{ wch: 40 }, { wch: 30 }, { wch: 50 }, { wch: 15 }];
+  const ws2 = sheet(
+    [["ELO Code", "Expected Learning Outcome", "Assessment Method"],
+     ...arr(data.elos).map(e => [e.code || '', e.outcome || '', e.assessment || ''])],
+    [15, 60, 40]);
 
-  // Create Workbook
+  const ws3 = sheet(
+    [["Exact Indicator", "Lesson Component", "Observable Evidence", "Alignment Status"],
+     ...arr(data.alignment).map(r => [r.indicator || '', r.lesson_component || '', r.evidence || '', r.status || ''])],
+    [40, 30, 50, 20]);
+
+  const ws4 = sheet(
+    [["Check", "Result", "Notes"],
+     ...arr(data.quality_checks).map(c => [c.check || '', c.result || '', c.notes || '']),
+     [],
+     ["Teacher Review Notes", "", ""],
+     ...arr(data.teacher_review_notes).map(n => [n, "", ""])],
+    [35, 25, 80]);
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws1, "ILAW Lesson Plan");
   XLSX.utils.book_append_sheet(wb, ws2, "Expected Learning Outcomes");
   XLSX.utils.book_append_sheet(wb, ws3, "PPST-COT Alignment");
+  XLSX.utils.book_append_sheet(wb, ws4, "Quality & Review Notes");
 
-  // Format filename
   const safeSubject = (meta.subject || 'Subject').replace(/[^a-z0-9]/gi, '_');
   const safeGrade = (meta.gradeLevel || 'Grade').replace(/[^a-z0-9]/gi, '_');
-  const filename = `LessonPlan_${safeSubject}_${safeGrade}.xlsx`;
-
-  // Download
-  XLSX.writeFile(wb, filename);
+  XLSX.writeFile(wb, `LessonPlan_${safeSubject}_${safeGrade}.xlsx`);
   showToast('Excel workbook downloaded!', 'success');
 });
 
@@ -590,15 +592,15 @@ function renderRecent() {
   const history = getHistory();
   const list = document.getElementById('recentList');
   const clearBtn = document.getElementById('clearRecentBtn');
-  
+
   list.innerHTML = '';
-  
+
   if (history.length === 0) {
     list.innerHTML = '<p class="muted">No recent generations yet.</p>';
     clearBtn.classList.add('hidden');
     return;
   }
-  
+
   clearBtn.classList.remove('hidden');
   clearBtn.onclick = () => {
     if (confirm('Clear all recent history?')) {
@@ -607,13 +609,15 @@ function renderRecent() {
     }
   };
 
-  history.forEach((item, index) => {
+  history.forEach((item) => {
+    if (!item || !item.meta) return;
+    const when = item.savedAt ? new Date(item.savedAt).toLocaleDateString() : '';
     const div = document.createElement('div');
     div.className = 'recent-item';
     div.innerHTML = `
       <div class="recent-item-info">
-        <h4>${item.meta.topic}</h4>
-        <span>${item.meta.subject} • ${item.meta.gradeLevel} • ${new Date().toLocaleDateString()}</span>
+        <h4>${esc(item.meta.topic)}</h4>
+        <span>${esc(item.meta.subject)} • ${esc(item.meta.gradeLevel)}${when ? ' • ' + esc(when) : ''}</span>
       </div>
       <button class="btn btn-ghost btn-sm">View</button>
     `;
