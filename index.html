@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LessonPlan AI — Your AI-powered lesson planning assistant</title>
+<meta name="description" content="Generate integrated ILAW Lesson Plans, Expected Learning Outcomes, and PPST/COT Alignment Matrices in one Excel workbook." />
+
+<!-- Libraries (deferred, executed in order before app.js) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js" defer></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ======================= HEADER ======================= -->
+<header class="app-header">
+  <div class="header-inner">
+    <button class="brand" id="brandHome" type="button" aria-label="Go to dashboard">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <span class="brand-name">LessonPlan AI</span>
+        <span class="brand-sub">Your AI-powered lesson planning assistant.</span>
+      </span>
+    </button>
+
+    <nav class="header-nav" aria-label="Primary">
+      <button class="btn btn-ghost" type="button" data-nav="dashboard">Dashboard</button>
+      <button class="btn btn-primary" type="button" data-nav="generator">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        New Lesson Plan
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main class="app-main">
+
+  <!-- ======================= DASHBOARD ======================= -->
+  <section id="view-dashboard" class="view" aria-labelledby="dashTitle">
+    <div class="hero card">
+      <div class="hero-copy">
+        <span class="eyebrow">ILAW • ELO • PPST/COT</span>
+        <h1 id="dashTitle">Plan once. Align everything.</h1>
+        <p>Upload your competency, lesson materials, ELO template, and the exact PPST/COT indicators. LessonPlan AI returns a complete ILAW lesson plan, aligned learning outcomes, and a full observation matrix — ready to export as one Excel workbook.</p>
+        <div class="hero-actions">
+          <button class="btn btn-primary btn-lg" type="button" data-nav="generator">New Lesson Plan</button>
+          <button class="btn btn-ghost btn-lg" type="button" id="scrollToInstructions">How it works</button>
+        </div>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="art-sheet">
+          <div class="art-line w-70"></div>
+          <div class="art-line w-90"></div>
+          <div class="art-line w-55"></div>
+          <div class="art-chip-row">
+            <span class="art-chip ok">Aligned</span>
+            <span class="art-chip">ELO 3</span>
+          </div>
+          <div class="art-line w-80"></div>
+          <div class="art-line w-40"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent -->
+    <section class="card section-card" aria-labelledby="recentTitle">
+      <div class="card-head">
+        <div>
+          <h2 id="recentTitle">Recent generations</h2>
+          <p class="muted">Your last 10 generated lesson plans are stored on this device only.</p>
+        </div>
+        <button class="btn btn-ghost btn-sm hidden" type="button" id="clearRecentBtn">Clear all</button>
+      </div>
+      <div id="recentList" class="recent-list"></div>
+    </section>
+
+    <!-- Instructions -->
+    <section class="card section-card" id="instructions" aria-labelledby="instrTitle">
+      <div class="card-head">
+        <div>
+          <h2 id="instrTitle">Four source documents are required</h2>
+          <p class="muted">The generator reads these documents directly in your browser. Nothing is uploaded until you press <strong>Generate</strong>.</p>
+        </div>
+      </div>
+
+      <div class="instr-grid">
+        <article class="instr-card">
+          <span class="badge">A</span>
+          <h3>Learning Competency</h3>
+          <p>The official curriculum guide page or MELC listing that contains the <strong>exact competency code and wording</strong> for your grade level and subject.</p>
+          <span class="instr-meta">PDF · DOCX · TXT · DOC</span>
+        </article>
+        <article class="instr-card">
+          <span class="badge">B</span>
+          <h3>Actual Lesson Materials</h3>
+          <p>Your references, textbook pages, teaching materials, activities, and resources. <strong>Multiple files are allowed.</strong></p>
+          <span class="instr-meta">PDF · DOCX · TXT · DOC · multiple</span>
+        </article>
+        <article class="instr-card">
+          <span class="badge">C</span>
+          <h3>Required ELO Format</h3>
+          <p>The template or sample that defines <strong>how Expected Learning Outcomes must be written and coded</strong> in your school or division.</p>
+          <span class="instr-meta">PDF · DOCX · TXT · DOC</span>
+        </article>
+        <article class="instr-card">
+          <span class="badge">D</span>
+          <h3>Exact PPST/COT Indicators</h3>
+          <p>The <strong>exact classroom observation indicators</strong> from the PPST/COT rubric that the lesson must be aligned to.</p>
+          <span class="instr-meta">PDF · DOCX · TXT · DOC</span>
+        </article>
+      </div>
+
+      <ol class="steps">
+        <li><strong>Fill in</strong> grade level, subject, topic, and lesson duration.</li>
+        <li><strong>Upload</strong> all four source documents and review the extracted text.</li>
+        <li><strong>Generate</strong> — the AI returns the lesson plan, ELOs, matrix, and quality checks.</li>
+        <li><strong>Review and download</strong> a single Excel workbook with three worksheets.</li>
+      </ol>
+    </section>
+  </section>
+
+  <!-- ======================= GENERATOR ======================= -->
+  <section id="view-generator" class="view hidden" aria-labelledby="genTitle">
+    <div class="page-head">
+      <div>
+        <button class="link-btn back-link" type="button" data-nav="dashboard">← Back to dashboard</button>
+        <h1 id="genTitle">New Lesson Plan</h1>
+        <p class="muted">Complete the details and attach the four required source documents.</p>
+      </div>
+    </div>
+
+    <div id="formAlert" class="alert hidden" role="alert"></div>
+
+    <form id="planForm" novalidate>
+
+      <!-- General info -->
+      <section class="card section-card">
+        <div class="card-head">
+          <div>
+            <h2>General Information</h2>
+            <p class="muted">Used for the lesson header and the Excel filename.</p>
+          </div>
+        </div>
+
+        <div class="field-grid">
+          <div class="field">
+            <label for="gradeLevel">Grade Level <span class="req">*</span></label>
+            <input id="gradeLevel" name="gradeLevel" type="text" placeholder="e.g. Grade 7" autocomplete="off" />
+            <span class="field-error" data-error-for="gradeLevel"></span>
+          </div>
+          <div class="field">
+            <label for="subject">Subject <span class="req">*</span></label>
+            <input id="subject" name="subject" type="text" placeholder="e.g. Science" autocomplete="off" />
+            <span class="field-error" data-error-for="subject"></span>
+          </div>
+          <div class="field">
+            <label for="topic">Lesson Topic <span class="req">*</span></label>
+            <input id="topic" name="topic" type="text" placeholder="e.g. Photosynthesis" autocomplete="off" />
+            <span class="field-error" data-error-for="topic"></span>
+          </div>
+          <div class="field">
+            <label for="lessonDuration">Lesson Duration <span class="req">*</span></label>
+            <input id="lessonDuration" name="lessonDuration" type="text" placeholder="e.g. 60 minutes" autocomplete="off" />
+            <span class="field-error" data-error-for="lessonDuration"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Source materials -->
+      <section class="card section-card">
+        <div class="card-head">
+          <div>
+            <h2>Required Source Materials</h2>
+            <p class="muted">Text is extracted in your browser. Empty or unreadable documents are never sent.</p>
+          </div>
+        </div>
+
+        <div class="upload-grid">
+
+          <!-- A -->
+          <div class="upload-card">
+            <div class="upload-head">
+              <span class="badge">A</span>
+              <div>
+                <h3>Learning Competency</h3>
+                <p>Exact competency code and wording.</p>
+              </div>
+            </div>
+            <div class="dropzone" data-drop="competency" tabindex="0" role="button" aria-label="Upload learning competency document">
+              <input type="file" accept=".pdf,.docx,.txt,.doc" hidden data-input="competency" />
+              <span class="dz-icon" aria-hidden="true">⬆</span>
+              <span class="dz-title">Click to upload or drag &amp; drop</span>
+              <span class="dz-hint">PDF, DOCX, TXT, DOC · 1 file</span>
+            </div>
+            <ul class="file-list" data-list="competency"></ul>
+          </div>
+
+          <!-- B -->
+          <div class="upload-card">
+            <div class="upload-head">
+              <span class="badge">B</span>
+              <div>
+                <h3>Actual Lesson Materials</h3>
+                <p>References, activities, and resources.</p>
+              </div>
+            </div>
+            <div class="dropzone" data-drop="materials" tabindex="0" role="button" aria-label="Upload lesson materials">
+              <input type="file" accept=".pdf,.docx,.txt,.doc" multiple hidden data-input="materials" />
+              <span class="dz-icon" aria-hidden="true">⬆</span>
+              <span class="dz-title">Click to upload or drag &amp; drop</span>
+              <span class="dz-hint">PDF, DOCX, TXT, DOC · multiple files</span>
+            </div>
+            <ul class="file-list" data-list="materials"></ul>
+          </div>
+
+          <!-- C -->
+          <div class="upload-card">
+            <div class="upload-head">
+              <span class="badge">C</span>
+              <div>
+                <h3>Required ELO Format</h3>
+                <p>Template for Expected Learning Outcomes.</p>
+              </div>
+            </div>
+            <div class="dropzone" data-drop="eloFormat" tabindex="0" role="button" aria-label="Upload required ELO format">
+              <input type="file" accept=".pdf,.docx,.txt,.doc" hidden data-input="eloFormat" />
+              <span class="dz-icon" aria-hidden="true">⬆</span>
+              <span class="dz-title">Click to upload or drag &amp; drop</span>
+              <span class="dz-hint">PDF, DOCX, TXT, DOC · 1 file</span>
+            </div>
+            <ul class="file-list" data-list="eloFormat"></ul>
+          </div>
+
+          <!-- D -->
+          <div class="upload-card">
+            <div class="upload-head">
+              <span class="badge">D</span>
+              <div>
+                <h3>Exact PPST/COT Indicators</h3>
+                <p>Classroom observation rubric wording.</p>
+              </div>
+            </div>
+            <div class="dropzone" data-drop="ppst" tabindex="0" role="button" aria-label="Upload PPST/COT indicators">
+              <input type="file" accept=".pdf,.docx,.txt,.doc" hidden data-input="ppst" />
+              <span class="dz-icon" aria-hidden="true">⬆</span>
+              <span class="dz-title">Click to upload or drag &amp; drop</span>
+              <span class="dz-hint">PDF, DOCX, TXT, DOC · 1 file</span>
+            </div>
+            <ul class="file-list" data-list="ppst"></ul>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Submit -->
+      <div class="submit-bar card">
+        <div class="submit-info">
+          <strong>Ready when you are.</strong>
+          <span class="muted">Generation usually takes 30–90 seconds.</span>
+        </div>
+        <div class="submit-actions">
+          <button class="btn btn-ghost" type="button" id="resetBtn">Reset form</button>
+          <button class="btn btn-primary btn-lg" type="submit" id="generateBtn">
+            <span class="btn-label">Generate Lesson Plan</span>
+          </button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <!-- ======================= RESULTS ======================= -->
+  <section id="view-results" class="view hidden" aria-labelledby="resTitle">
+    <div class="page-head">
+      <div>
+        <button class="link-btn back-link" type="button" data-nav="generator">← Back to editor</button>
+        <h1 id="resTitle">Generated Lesson Plan</h1>
+        <div id="resultMeta" class="meta-chips"></div>
+      </div>
+      <div class="page-head-actions">
+        <button class="btn btn-ghost" type="button" id="printBtn">Print</button>
+        <button class="btn btn-primary" type="button" id="downloadBtn">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          Download Excel
+        </button>
+      </div>
+    </div>
+
+    <div id="resultsBody"></div>
+  </section>
+
+</main>
+
+<!-- ======================= LOADING OVERLAY ======================= -->
+<div id="loadingOverlay" class="overlay hidden" role="status" aria-live="polite">
+  <div class="overlay-card">
+    <div class="spinner" aria-hidden="true"></div>
+    <h2 id="loadingTitle">Generating your lesson plan…</h2>
+    <p id="loadingText" class="muted">Sending your documents to the AI service. Please keep this tab open.</p>
+  </div>
+</div>
+
+<!-- ======================= TOAST ======================= -->
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+<noscript>
+  <div class="noscript">LessonPlan AI requires JavaScript. Please enable JavaScript and reload the page.</div>
+</noscript>
+
+<script src="app.js" defer></script>
+</body>
+</html>
