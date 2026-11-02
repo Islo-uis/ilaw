@@ -17,6 +17,13 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => (
 ));
 const arr = (v) => Array.isArray(v) ? v : [];
 
+// Accepted file types
+const DOC_EXT = ['pdf', 'docx', 'txt', 'doc'];
+const IMG_EXT = ['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp', 'bmp', 'gif'];
+const ALL_EXT = [...DOC_EXT, ...IMG_EXT];
+const MAX_IMAGE_MB = 20;      // largest photo accepted
+const MAX_IMAGE_DIM = 2400;   // photos are scaled down to this size before OCR (faster)
+
 // ==========================================
 // STATE
 // ==========================================
@@ -129,8 +136,12 @@ async function handleFiles(files, type) {
 
   for (const file of fileArray) {
     const ext = file.name.split('.').pop().toLowerCase();
-    if (!['pdf', 'docx', 'txt', 'doc'].includes(ext)) {
+    if (!ALL_EXT.includes(ext)) {
       showToast(`Unsupported file type: .${ext}`, 'error');
+      continue;
+    }
+    if (IMG_EXT.includes(ext) && file.size > MAX_IMAGE_MB * 1024 * 1024) {
+      showToast(`Photo is too large (max ${MAX_IMAGE_MB} MB): ${file.name}`, 'error');
       continue;
     }
 
@@ -141,7 +152,12 @@ async function handleFiles(files, type) {
       size: file.size,
       text: '',
       error: null,
-      loading: true
+      note: null,
+      loading: true,
+      isImage: IMG_EXT.includes(ext),
+      status: '',
+      progress: null,
+      open: false
     };
 
     if (!isMultiple) {
@@ -152,6 +168,14 @@ async function handleFiles(files, type) {
 
     renderFileList(type);
     processFile(fileObj);
+  }
+}
+
+function rerenderFor(fileObj) {
+  for (const type in state.files) {
+    if (state.files[type].some(f => f.id === fileObj.id)) {
+      renderFileList(type);
+    }
   }
 }
 
@@ -167,19 +191,17 @@ async function processFile(fileObj) {
     } else if (ext === 'doc') {
       // Basic fallback for .doc, might have binary junk but we try
       fileObj.text = await extractTXT(fileObj.file);
+    } else if (IMG_EXT.includes(ext)) {
+      fileObj.text = await extractImage(fileObj, ext);
     }
   } catch (err) {
     fileObj.error = err.message || 'Failed to extract text';
   }
 
   fileObj.loading = false;
-
-  // Find which type this belongs to and re-render
-  for (const type in state.files) {
-    if (state.files[type].some(f => f.id === fileObj.id)) {
-      renderFileList(type);
-    }
-  }
+  fileObj.status = '';
+  fileObj.progress = null;
+  rerenderFor(fileObj);
 }
 
 async function extractPDF(file) {
@@ -216,6 +238,114 @@ function extractTXT(file) {
 }
 
 // ==========================================
+// PHOTOS: HEIC CONVERSION + OCR (runs in the browser)
+// ==========================================
+let ocrWorkerPromise = null;
+let ocrCurrent = null;            // the file currently being read
+let ocrQueue = Promise.resolve(); // photos are read one at a time
+
+function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = Tesseract.createWorker('eng', 1, {
+      logger: (m) => {
+        if (ocrCurrent && m.status === 'recognizing text') {
+          const pct = Math.round((m.progress || 0) * 100);
+          if (pct !== ocrCurrent.progress) {
+            ocrCurrent.progress = pct;
+            rerenderFor(ocrCurrent);
+          }
+        }
+      }
+    }).catch((err) => {
+      ocrWorkerPromise = null; // allow a retry next time
+      throw new Error('The text-reading engine could not start. Check your internet connection and try again.');
+    });
+  }
+  return ocrWorkerPromise;
+}
+
+function loadImage(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('This image could not be opened. Try saving it as a JPG or PNG.'));
+    };
+    img.src = url;
+  });
+}
+
+// Converts HEIC to JPEG if needed, scales big photos down, and returns a PNG blob.
+async function prepareImage(file, ext) {
+  let blob = file;
+  if (ext === 'heic' || ext === 'heif') {
+    if (typeof heic2any === 'undefined') {
+      throw new Error('The HEIC converter failed to load. Refresh the page, or use a JPG or PNG photo.');
+    }
+    const out = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 });
+    blob = Array.isArray(out) ? out[0] : out;
+  }
+
+  const img = await loadImage(blob);
+  const longest = Math.max(img.naturalWidth, img.naturalHeight);
+  const scale = Math.min(1, MAX_IMAGE_DIM / longest);
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff'; // white background for transparent PNGs
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+
+  const png = await new Promise(res => canvas.toBlob(res, 'image/png'));
+  if (!png) throw new Error('This image could not be processed. Try a smaller photo.');
+  return png;
+}
+
+function extractImage(fileObj, ext) {
+  const task = ocrQueue.then(async () => {
+    if (typeof Tesseract === 'undefined') {
+      throw new Error('The text-reading engine failed to load. Refresh the page and try again.');
+    }
+    fileObj.status = 'Preparing photo...';
+    fileObj.progress = null;
+    rerenderFor(fileObj);
+    const blob = await prepareImage(fileObj.file, ext);
+
+    fileObj.status = 'Reading text from photo...';
+    fileObj.progress = 0;
+    rerenderFor(fileObj);
+    const worker = await getOcrWorker();
+
+    ocrCurrent = fileObj;
+    let data;
+    try {
+      ({ data } = await worker.recognize(blob));
+    } finally {
+      ocrCurrent = null;
+    }
+
+    const text = (data.text || '').replace(/\n{3,}/g, '\n\n').trim();
+    if (text.replace(/\s/g, '').length < 10) {
+      throw new Error('No readable text found in this photo. Try a clearer, well-lit, straight-on photo.');
+    }
+    if (typeof data.confidence === 'number' && data.confidence < 65) {
+      fileObj.note = 'Low reading confidence. Please click "Review / Edit Text" and correct any mistakes before generating.';
+    } else {
+      fileObj.note = 'Text was read from a photo. Please review it for mistakes before generating.';
+    }
+    return text;
+  });
+  ocrQueue = task.catch(() => {}); // keep the queue moving after a failure
+  return task;
+}
+
+// ==========================================
 // RENDER FILE LISTS
 // ==========================================
 function renderFileList(type) {
@@ -232,7 +362,7 @@ function renderFileList(type) {
 
     const name = document.createElement('span');
     name.className = 'file-name';
-    name.textContent = fileObj.name;
+    name.textContent = (fileObj.isImage ? '📷 ' : '') + fileObj.name;
 
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
@@ -250,8 +380,19 @@ function renderFileList(type) {
     if (fileObj.loading) {
       const meta = document.createElement('div');
       meta.className = 'file-meta';
-      meta.textContent = 'Extracting text...';
+      const pct = fileObj.progress != null ? ` ${fileObj.progress}%` : '';
+      meta.textContent = (fileObj.status || 'Extracting text...') + pct;
       li.appendChild(meta);
+
+      if (fileObj.progress != null) {
+        const bar = document.createElement('div');
+        bar.className = 'file-progress';
+        const fill = document.createElement('div');
+        fill.className = 'file-progress-fill';
+        fill.style.width = `${fileObj.progress}%`;
+        bar.appendChild(fill);
+        li.appendChild(bar);
+      }
     } else if (fileObj.error) {
       const warn = document.createElement('div');
       warn.className = 'file-warning';
@@ -267,20 +408,35 @@ function renderFileList(type) {
       const toggle = document.createElement('button');
       toggle.type = 'button';
       toggle.className = 'file-preview-toggle';
-      toggle.textContent = 'Review Text';
+      toggle.textContent = fileObj.open ? 'Hide Text' : 'Review / Edit Text';
 
-      const preview = document.createElement('div');
-      preview.className = 'file-preview-text';
-      preview.textContent = fileObj.text;
+      // Editable, so mistakes in photo text can be corrected before sending
+      const preview = document.createElement('textarea');
+      preview.className = 'file-preview-text' + (fileObj.open ? ' show' : '');
+      preview.value = fileObj.text;
+      preview.rows = 8;
+      preview.spellcheck = false;
+      preview.addEventListener('input', () => {
+        fileObj.text = preview.value;
+        len.textContent = `${fileObj.text.length.toLocaleString()} characters extracted`;
+      });
 
       toggle.onclick = () => {
-        preview.classList.toggle('show');
-        toggle.textContent = preview.classList.contains('show') ? 'Hide Text' : 'Review Text';
+        fileObj.open = !fileObj.open;
+        preview.classList.toggle('show', fileObj.open);
+        toggle.textContent = fileObj.open ? 'Hide Text' : 'Review / Edit Text';
       };
 
       meta.appendChild(len);
       meta.appendChild(toggle);
       li.appendChild(meta);
+
+      if (fileObj.note) {
+        const note = document.createElement('div');
+        note.className = 'file-note';
+        note.textContent = `ℹ ${fileObj.note}`;
+        li.appendChild(note);
+      }
       li.appendChild(preview);
     }
 
@@ -380,6 +536,11 @@ planForm.addEventListener('submit', async (e) => {
     }
     if (files.some(f => f.loading)) {
       showAlert(`Please wait for the ${label} file to finish extracting text.`);
+      isValid = false;
+      break;
+    }
+    if (files.some(f => !f.text.trim())) {
+      showAlert(`One of the ${label} files has no text. Please add text or replace the file.`);
       isValid = false;
       break;
     }
